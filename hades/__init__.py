@@ -11,6 +11,7 @@ from datetime import datetime
 from urllib.parse import urlparse, urljoin
 
 from flask import Flask, redirect, render_template, request, url_for, jsonify, abort
+from flask_cors import CORS
 from flask_login import (
     LoginManager,
     login_required,
@@ -23,7 +24,8 @@ from sqlalchemy import inspect
 from sqlalchemy.exc import DataError, IntegrityError
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY')
+cors = CORS(app)
+app.secret_key = 'sadasdasdasdasd' #os.getenv('SECRET_KEY')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 db = SQLAlchemy(app)
 login_manager = LoginManager()
