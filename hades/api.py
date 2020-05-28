@@ -131,7 +131,7 @@ def users_api():
     table = get_table_by_name(table_name)
     if table is None:
         return jsonify({'response': f'Table {table_name} does not exist!'}), 400
-    return users_to_json(table.query.all()), 200
+    return jsonify({'response':users_to_json(table.query.all())}), 200
 
 
 @app.route('/api/create', methods=['POST'])
