@@ -3,13 +3,12 @@ from json import dumps, loads
 from decouple import config
 from flask import jsonify, request
 from flask_login import login_required, current_user
-from sqlalchemy.exc import IntegrityError
 
 from . import (
     app,
     log,
 )
-from .db_utils import insert
+from .db_utils import insert, get_user, save_user
 from .utils import (
     check_access,
     delete_user,
@@ -18,6 +17,7 @@ from .utils import (
     get_table_full_name,
     get_accessible_tables,
     get_table_by_name,
+    users_to_csv,
 )
 
 
@@ -59,7 +59,7 @@ def stats_api():
             return jsonify({'message': f'Table {table_name} does not exist'}), 400
         if check_access(table_name):
             return (
-                jsonify({get_table_full_name(table_name): len(table.query.all())}),
+                jsonify({get_table_full_name(table_name): len(table.objects)}),
                 200,
             )
         return (
@@ -75,7 +75,7 @@ def stats_api():
             'tsg',
             'users',
         ):
-            ret[table.full_name] = len(get_table_by_name(table.name).query.all())
+            ret[table.full_name] = len(get_table_by_name(table.name).objects())
     return jsonify(ret), 200
 
 
@@ -96,7 +96,7 @@ def users_api():
         for table in tables:
             if table.name in ('access', 'events', 'users'):
                 continue
-            table_users = get_table_by_name(table.name).query.all()
+            table_users = get_table_by_name(table.name).objects()
             for user in table_users:
                 phone = (
                     user.phone.split('|')[1]
@@ -119,7 +119,9 @@ def users_api():
     table = get_table_by_name(table_name)
     if table is None:
         return jsonify({'message': f'Table {table_name} does not exist!'}), 400
-    return jsonify(users_to_json(table.query.all())), 200
+    if request.args.get('csv'):
+        return users_to_csv(table), 200
+    return jsonify(users_to_json(table.objects())), 200
 
 
 @app.route('/api/create', methods=['POST'])
@@ -174,7 +176,7 @@ def create():
 
 @app.route('/api/delete', methods=['DELETE'])
 @login_required
-def delete():
+def delete_api():
     """Deletes the user as specified in the request data"""
 
     # TODO: use utils.delete_user()
@@ -204,7 +206,7 @@ def delete():
         )
         # Store the message to be returned
         ret = []
-        for user in table.query.all():
+        for user in table.objects():
             if delete_user(user.id, table_name):
                 ret.append(f'Deleted user {user} from {table_name}')
             else:
@@ -261,7 +263,7 @@ def update_user():
         f'<code>{current_user.name}</code> is trying to update user {key} {data} in table {table_name}!'
     )
 
-    user = table.query.get(data)
+    user = get_user(table, data)
 
     log_message = f'{current_user.name} has:'
     for k, v in request.form.items():
@@ -273,13 +275,10 @@ def update_user():
             log_message += f'\nUpdated {k} of {user.name} from {o} to {v}'
 
     log(log_message)
-    try:
-        table.query.session.commit()
-    except IntegrityError:
+    success, reason = save_user(user)
+    if not success:
         return (
-            jsonify(
-                {'message': 'Integrity constraint violated, please re-check your data!'}
-            ),
+            jsonify({'message': f'Error occurred - {reason}'}),
             400,
         )
     log(
@@ -310,9 +309,9 @@ def sendmail():
     table = get_table_by_name(table_name)
     if 'ids' in request.form and request.form['ids'] != 'all':
         ids = list(map(lambda x: int(x), request.form['ids'].split(' ')))
-        users = table.query.filter(table.id.in_(ids)).all()
+        users = table.objects(pk__in=ids)
     else:
-        users = table.query.all()
+        users = table.objects()
 
     if 'email_address' in request.form:
         email_address = request.form['email_address']

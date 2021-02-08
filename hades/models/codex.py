@@ -1,38 +1,31 @@
-from hades import db
-
+from mongoengine import ValidationError, StringField, DynamicDocument
 from requests import get
 
-from hades.models.validate import ValidateMixin
+from hades.models.validate import EventMixin
 
 
-class CodexApril2019(ValidateMixin, db.Model):
+class CodexApril2019(DynamicDocument, EventMixin):
     """
     Database model class
     """
 
-    __tablename__ = 'codex_april_2019'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(30))
-    email = db.Column(db.String(50), unique=True)
-    phone = db.Column(db.String(21), unique=True)
-    department = db.Column(db.String(50))
+    meta = {'collection': 'codex_april_2019'}
+
+    department = StringField()
 
     def __repr__(self):
         return '%r' % [self.id, self.name, self.email, self.phone, self.department]
 
 
-class RSC2019(ValidateMixin, db.Model):
+class RSC2019(DynamicDocument, EventMixin):
     """
     Database model class
     """
 
-    __tablename__ = 'rsc_2019'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(30))
-    email = db.Column(db.String(50), unique=True)
-    phone = db.Column(db.String(21), unique=True)
-    department = db.Column(db.String(50))
-    year = db.Column(db.String(3))
+    meta = {'collection': 'rsc_2019'}
+
+    department = StringField()
+    year = StringField(max_length=3)
 
     def __repr__(self):
         return '%r' % [
@@ -45,20 +38,31 @@ class RSC2019(ValidateMixin, db.Model):
         ]
 
 
-class CodexDecember2019(ValidateMixin, db.Model):
+class CodexDecember2019(DynamicDocument, EventMixin):
     """
     Database model class
     """
 
-    __tablename__ = 'codex_december_2019'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(62))
-    email = db.Column(db.String(102), unique=True)
-    phone = db.Column(db.String(21), unique=True)
-    department = db.Column(db.String(20))
-    year = db.Column(db.String(3))
-    hackerrank_username = db.Column(db.String(50), unique=True)
-    paid = db.Column(db.String(20))
+    def __validate_hackerrank_username__(username):
+        """
+        Validate if hackerrank username exists
+        :param username: hackerrank username to test
+        :return: None, raise error if username doesn't exist
+        """
+        if (
+            get(f'https://hackerrank.com/{username}').content.decode().count(username)
+            < 3
+        ):
+            raise ValidationError("Your hackerrank profile doesn't seem to exist!")
+
+    meta = {'collection': 'codex_december_2019'}
+
+    department = StringField()
+    year = StringField(max_length=3)
+    hackerrank_username = StringField(
+        unique=True, validation=__validate_hackerrank_username__
+    )
+    paid = StringField()
 
     def __repr__(self):
         return '%r' % [
@@ -72,34 +76,30 @@ class CodexDecember2019(ValidateMixin, db.Model):
             self.paid,
         ]
 
-    def validate(self):
-        if (
-            get(f'https://hackerrank.com/{self.hackerrank_username}')
-            .content.decode()
-            .count(self.hackerrank_username)
-            < 3
-        ):
-            return f"Your hackerrank profile doesn't seem to exist!"
 
-        if self.query.filter(
-            CodexDecember2019.hackerrank_username == self.hackerrank_username
-        ).first():
-            return f"Someone has already registered with hackerrank username <code>{self.hackerrank_username}</code>.<br/>Kindly contact the team if that is your username and it wasn't your registration"
-        return super().validate()
-
-
-class BOV2020(ValidateMixin, db.Model):
+class BOV2020(DynamicDocument, EventMixin):
     """
     Database model class
     """
 
-    __tablename__ = 'bov_2020'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(31))
-    email = db.Column(db.String(51), unique=True)
-    phone = db.Column(db.String(19))
-    hackerrank_username = db.Column(db.String(50), unique=True)
-    country = db.Column(db.String(24))
+    def __validate_hackerrank_username__(username):
+        """
+        Validate if hackerrank username exists
+        :param username: hackerrank username to test
+        :return: None, raise error if username doesn't exist
+        """
+        if (
+            get(f'https://hackerrank.com/{username}').content.decode().count(username)
+            < 3
+        ):
+            raise ValidationError("Your hackerrank profile doesn't seem to exist!")
+
+    meta = {'collection': 'bov_2020'}
+
+    hackerrank_username = StringField(
+        unique=True, validation=__validate_hackerrank_username__
+    )
+    country = StringField()
 
     def __repr__(self):
         return '%r' % [
@@ -110,18 +110,3 @@ class BOV2020(ValidateMixin, db.Model):
             self.hackerrank_username,
             self.country,
         ]
-
-    def validate(self):
-        if (
-            get(f'https://hackerrank.com/{self.hackerrank_username}')
-            .content.decode()
-            .count(self.hackerrank_username)
-            < 3
-        ):
-            return f"Your hackerrank profile doesn't seem to exist!"
-
-        if self.query.filter(
-            BOV2020.hackerrank_username == self.hackerrank_username
-        ).first():
-            return f"Someone has already registered with hackerrank username <code>{self.hackerrank_username}</code>.<br/>Kindly contact the team if that is your username and it wasn't your registration"
-        return super().validate()

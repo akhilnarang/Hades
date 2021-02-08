@@ -4,7 +4,7 @@ Flask application to accept some details, generate, display, and email a QR code
 """
 
 # pylint: disable=invalid-name,too-few-public-methods,no-member,line-too-long,too-many-locals
-
+import binascii
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
 
@@ -17,15 +17,20 @@ from flask_login import (
     logout_user,
 )
 from flask_login.utils import login_url
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect
+from mongoengine import connect
+from requests import post
 
 app = Flask(__name__)
 app.secret_key = config('SECRET_KEY')
-app.config['SQLALCHEMY_DATABASE_URI'] = config('DATABASE_URL')
 app.config['JSON_SORT_KEYS'] = False
 
-db = SQLAlchemy(app)
+connect(
+    config("DB_NAME"),
+    host=config("DB_URI"),
+    username=config('DB_USER'),
+    password=config('DB_PASSWORD'),
+)
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 
@@ -36,14 +41,14 @@ from .utils import *
 from . import api
 
 # Import event related classes
+from . import models
 
 # Import miscellaneous classes
 from .models.user import Users, TSG
-from .models.user_access import Access
 
 # A list of currently active events
-ACTIVE_TABLES = [models.giveaway.Coursera2020]
-ACTIVE_EVENTS = ['Coursera 2020']
+ACTIVE_TABLES = [models.test.NewEvent]
+ACTIVE_EVENTS = ['New Event']
 
 # The list of fields that will be required for any and all form submissions
 REQUIRED_FIELDS = ('name', 'phone', 'email')
@@ -59,7 +64,7 @@ def is_safe_url(target: str) -> bool:
 @login_manager.user_loader
 def load_user(user_id):
     """Return `User` object for the corresponding `user_id`"""
-    return Users.query.get(user_id)
+    return Users.objects(pk=user_id).first()
 
 
 @login_manager.request_loader
@@ -75,30 +80,26 @@ def load_user_from_request(request):
     If they match any user in the database, that user is logged into that session
     """
     credentials = request.headers.get('Credentials')
-    if credentials:
-        try:
-            credentials = base64.b64decode(credentials).decode('utf-8')
-        except UnicodeDecodeError:
+    if not credentials:
+        credentials = request.headers.get('Authorization')
+        if not credentials:
             return None
-        username, password = credentials.split('|')
-        user = get_user(Users, username)
-        if user:
-            if user.check_password_hash(password.strip()):
-                log(
-                    f'User <code>{user.name}</code> just authenticated a {request.method} API call with credentials!',
-                )
-                return user
-    api_key = request.headers.get('Authorization')
-    if api_key:
-        # Cases where the header may be of the form `Authorization: Basic api_key`
-        api_key = api_key.replace('Basic ', '', 1)
-        users = get_data_from_table(Users)
-        for user in users:
-            if user.check_api_key(api_key):
-                log(
-                    f'User <code>{user.name}</code> just authenticated a {request.method} API call with an API key!',
-                )
-                return user
+
+    # Cases where the header may be of the form `Authorization: Basic api_key`
+    credentials = credentials.replace('Basic ', '', 1)
+
+    try:
+        credentials = base64.b64decode(credentials).decode('utf-8')
+    except (UnicodeDecodeError, binascii.Error):
+        return None
+    username, password = credentials.split('|')
+    user = get_user(Users, username)
+    if user:
+        if user.check_password_hash(password.strip()):
+            log(
+                f'User <code>{user.name}</code> just authenticated a {request.method} API call with credentials!',
+            )
+            return user
     return None
 
 
@@ -190,14 +191,14 @@ def submit():
 
     # Ensure that we only take in valid fields to create our user object
     for k, v in request.form.items():
-        if k in table.__table__.columns._data.keys():
+        if k in table._db_field_map.keys():
             data[k] = v
 
     # Instantiate our user object based on the received form data and retrived ID
     user = table(**data, id=id_)
 
     # If a separate WhatsApp number has been provided, store that in the database as well
-    if 'whatsapp_number' in request.form:
+    if 'whatsapp_number' in request.form and request.form['whatsapp_number'] != '':
         try:
             if int(user.phone) != int(request.form['whatsapp_number']):
                 user.phone += f"|{request.form['whatsapp_number']}"
@@ -219,11 +220,6 @@ def submit():
         user.email += f", {request.form['email_second_person']}"
         user.department += f", {request.form['department_second_person']}"
 
-    # Ensure that no data is duplicated. If anything is wrong, display the corresponding error to the user
-    data = user.validate()
-    if data is not True:
-        return data
-
     # Generate the QRCode based on the given data and store base64 encoded version of it to email
     if 'no_qr' not in request.form:
         img = generate_qr(user)
@@ -231,11 +227,13 @@ def submit():
         img_data = open('qr.png', 'rb').read()
         encoded = base64.b64encode(img_data).decode()
 
-    # Add the user to the database and commit the transaction, ensuring no integrity errors.
-    success, reason = insert(user)
+    # Add the user to the database, ensuring no integrity errors.
+    success, reason = insert([user])
     if not success:
         log(f'Could not insert user {user}')
         log(reason)
+        if reason == 'not_unique':
+            return 'Someone else has already registered using these details! Kindly enter different values!'
         return """It appears there was an error while trying to enter your data into our database.<br/>Kindly contact someone from the team and we will have this resolved ASAP"""
 
     # Prepare the email sending
@@ -384,15 +382,15 @@ def register():
         u.username = username
         u.generate_password_hash(password)
         u.email = email
-        api_key = u.generate_api_key()
+        u.access = []
 
         # Add user object to list of objects to be inserted
         objects = [u]
 
         # If you're a TSG member, you get some access by default
         if is_user_tsg(email):
-            objects.append(Access(event='tsg', user=username))
-            objects.append(Access(event='test_users', user=username))
+            u.access.append(Events.objects(pk='tsg').first())
+            u.access.append(Events.objects(pk='test_users').first())
 
         success, reason = insert(objects)
 
@@ -404,10 +402,8 @@ def register():
         login_user(u)
 
         return (
-            f"Hello {username}, your account has been successfully created.<br>If you wish to use an API Key for "
-            f"sending requests, your key is <code>{api_key}</code><br/>Don't share it with anyone, "
-            f"if you're unsure of what it is, you don't need it!<br/>You're logged into your account, feel free to "
-            f"browse around "
+            f"Hello {username}, your account has been successfully created.<br/>You're logged into your account, feel "
+            f"free to browse around "
         )
 
     # Logout current user before trying to register a new account
@@ -437,7 +433,7 @@ def events():
         )
         user_data = get_data_from_table(table)
         return render_template(
-            'users.html', users=user_data, columns=table.__table__.columns._data.keys()
+            'users.html', users=user_data, columns=table._db_field_map.keys()
         )
     return render_template('events.html', events=get_accessible_tables())
 
@@ -457,11 +453,8 @@ def update():
         if 'field' not in request.form:
             table_name = request.form['table']
             table = get_table_by_name(table_name)
-            i = inspect(table)
-            fields = i.columns.keys()
-            for f in fields:
-                if i.columns[f].primary_key or i.columns[f].unique:
-                    fields.remove(f)
+
+            fields = table._db_field_map.keys()
 
             return render_template(
                 'update.html',
@@ -473,10 +466,8 @@ def update():
         if table is None:
             return 'Table not chosen?'
 
-        user = get_user(table, request.form['key'])
-        success, reason = update_row_in_table(
-            user, request.form['field'], request.form['value']
-        )
+        user = get_user(table, request.form['id'])
+        success, reason = update_doc(user, request.form['field'], request.form['value'])
 
         if not success:
             return f'Error occurred trying to update - {reason}'
@@ -485,6 +476,42 @@ def update():
             f"<code>{current_user.name}</code> has updated <code>{request.form['field']}</code> of <code>{user}</code> to <code>{request.form['value']}</code>"
         )
         return 'User has been updated!'
+    return render_template('events.html', events=get_accessible_tables())
+
+
+@app.route('/delete', methods=['GET', 'POST'])
+@login_required
+def delete():
+    """
+    Displays a page with a dropdown to choose events on a GET request
+    For POST, there for 2 cases
+    If an `id` is not provided, it gets table table from the form and returns a page where user can choose an id
+    If an id is provided, it deletes that id from the table
+    """
+    if request.method == 'POST':
+        table_name = request.form['table']
+        table = get_table_by_name(table_name)
+        if 'id' not in request.form:
+            user_data = get_data_from_table(table)
+
+            return render_template(
+                'delete.html', table_name=table_name, user_data=user_data
+            )
+
+        if table is None:
+            return 'Table not chosen?'
+
+        success, reason = utils.delete_user(request.form['id'], table_name)
+
+        if not success:
+            return f'Error occurred trying to delete - {reason}'
+
+        log(
+            f"<code>{current_user.name}</code> has deleted <code>{request.form['id']}</code> from {table_name}"
+        )
+        return (
+            f"<code>{request.form['id']}</code> has been deleted from from {table_name}"
+        )
     return render_template('events.html', events=get_accessible_tables())
 
 
@@ -507,7 +534,7 @@ def change_password():
             return 'Current password you entered is wrong! Please try again!'
 
         # Commit the changes we made in the object to the database
-        success, reason = commit_transaction()
+        success, reason = save_user(current_user)
         if not success:
             return f'Error occurred while changing your password - {reason}!'
 
@@ -524,7 +551,7 @@ def forgot_username():
     if request.method == 'POST':
         if 'email' in request.form:
             email = request.form['email']
-            user = Users.query.filter(Users.email == email).first()
+            user = Users.objects(email=email).first()
             if user:
                 from_email = ('noreply@thescriptgroup.in', 'TSG Bot')
                 to_email = [(user.email, user.name)]
@@ -543,7 +570,7 @@ def forgot_password():
     if request.method == 'POST':
         if 'username' in request.form:
             username = request.form['username']
-            user = Users.query.get(username)
+            user = Users.objects(pk=username)
             if user:
                 reset_slug = utils.encrypt(username)
                 reset_url = request.host_url + 'reset_password' + '/' + reset_slug
@@ -573,11 +600,11 @@ def reset_password(slug: str):
 
         # Update password
         password = request.form['new_password']
-        user = Users.query.get(username)
+        user = Users.objects(pk=username)
         user.generate_password_hash(password)
 
         # Commit the changes we made in the object to the database
-        success, reason = commit_transaction()
+        success, reason = save_user(user)
         if not success:
             return f'Error occurred while changing your password - {reason}!'
         return 'Your password has been successfully changed!'
@@ -596,4 +623,14 @@ def logout():
 @app.route('/')
 def root():
     """Root endpoint. Displays the form to the user."""
-    return '<marquee>Nothing here!</marquee>'
+    return render_template('index.html')
+
+
+@app.route("/form")
+def form():
+    return render_template(
+        "form.html",
+        date="14th September, 2020",
+        db="new_event",
+        event="New Event",
+    )

@@ -6,20 +6,18 @@ from cryptography.fernet import Fernet
 from decouple import config
 from flask import request
 from flask_login import current_user
-from flask_sqlalchemy.model import Model
+from mongoengine import DynamicDocument
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Attachment, Content, Mail
-from sqlalchemy import desc
-from sqlalchemy.exc import IntegrityError
 
+from .db_utils import *
 from .models.codex import CodexApril2019, RSC2019, CodexDecember2019, BOV2020
 from .models.csi import CSINovember2019, CSINovemberNonMember2019
 from .models.event import Events
 from .models.giveaway import Coursera2020
 from .models.techo import EHJuly2019, P5November2019
 from .models.test import TestTable
-from .models.user import Users, TSG
-from .models.user_access import Access
+from .models.user import Users
 from .models.workshop import (
     CPPWSMay2019,
     CCPPWSAugust2019,
@@ -27,10 +25,7 @@ from .models.workshop import (
     CNovember2019,
     BitgritDecember2019,
 )
-
 from .telegram import TG
-
-from .db_utils import *
 
 # SendGrid API Key
 SENDGRID_API_KEY = config('SENDGRID_API_KEY')
@@ -57,7 +52,6 @@ DATABASE_CLASSES = {
     'c_november_2019': CNovember2019,
     'bitgrit_december_2019': BitgritDecember2019,
     'test_users': TestTable,
-    'access': Access,
     'users': Users,
     'events': Events,
     'codex_december_2019': CodexDecember2019,
@@ -72,17 +66,27 @@ QR_BLACKLIST = (
 )
 
 
-def users_to_json(users: list) -> list:
+def users_to_json(users: List[Users]) -> list:
     json_data = []
     for user in users:
         user_data = {}
-        for k in user.__table__.columns._data.keys():
+        for k in user._db_field_map.keys():
             value = getattr(user, k)
             if value is not None and value != '':
                 user_data[k] = value
         json_data.append(user_data)
 
     return json_data
+
+
+def users_to_csv(table: DynamicDocument) -> str:
+    keys = table._db_field_map.keys()
+    ret = ','.join(keys) + '\n'
+    for user in table.objects:
+        for key in keys:
+            ret += str(user[key]) + ','
+        ret += '\n'
+    return ret
 
 
 def log(message: str):
@@ -99,32 +103,25 @@ def log(message: str):
 
 def check_access(table_name: str) -> bool:
     """Returns whether or not the currently logged in user has access to `table_name`"""
-    return Access.query.filter(Access.user == current_user.username).filter(
-        Access.event == table_name
-    )
+    return Users.objects(access=table_name).first() is not None
 
 
-def get_table_by_name(name: str) -> Model:
+def get_table_by_name(name: str) -> DynamicDocument:
     """Returns the database model class corresponding to the given name."""
     return DATABASE_CLASSES.get(name)
 
 
 def get_table_full_name(name: str) -> str:
     """Returns the full name of the table"""
-    return Events.query.filter(Events.name == name).first().full_name
+    return Events.objects(name=name).first().full_name
 
 
 def get_accessible_tables():
     """Returns the list of tables the currently logged in user can access"""
-    return (
-        Events.query.filter(Users.username == current_user.username)
-        .filter(Users.username == Access.user)
-        .filter(Access.event == Events.name)
-        .all()
-    )
+    return Users.objects(username=current_user.username).first().access
 
 
-def update_user(id_: int, table: Model, user_data: dict) -> (bool, str):
+def update_user(id_: int, table: DynamicDocument, user_data: dict) -> (bool, str):
     """
     :param id_ -> User ID
     :param table -> Table class
@@ -152,7 +149,7 @@ def update_user(id_: int, table: Model, user_data: dict) -> (bool, str):
 
     log(log_message)
 
-    success, reason = commit_transaction()
+    success, reason = save_user(user)
     if not success:
         log(f'Could not update {id_} in {table_name} - {reason}')
         return success, reason
@@ -171,7 +168,7 @@ def delete_user(id_: int, table_name: str) -> (bool, str):
     if table is None:
         return False, f'Table {table_name} does not seem to exist!'
 
-    user = table.query.get(id_)
+    user = table.objects(pk=id_)
     if user is None:
         return False, f'Table {table_name} does not have a user with ID {id_}'
 
@@ -185,10 +182,10 @@ def delete_user(id_: int, table_name: str) -> (bool, str):
     return success, f'{current_user.name} has deleted {user} from {table_name}'
 
 
-def get_current_id(table: Model) -> int:
+def get_current_id(table: DynamicDocument) -> int:
     """Function to return the latest ID based on the database entries. 1 if DB is empty."""
     try:
-        id_ = table.query.order_by(desc(table.id)).first().id
+        id_ = table.objects().order_by('-id').first().id
     except:
         id_ = 0
     return int(id_) + 1
@@ -197,7 +194,7 @@ def get_current_id(table: Model) -> int:
 def generate_qr(user):
     """Function to generate and return a QR code based on the given data."""
     data = {k: v for k, v in user.__dict__.items() if k not in QR_BLACKLIST}
-    data['table'] = user.__tablename__
+    data['table'] = user.__dict__.get('_cls', 'unknown_collection')
     return qrcode.make(base64.b64encode(dumps(data).encode()))
 
 
